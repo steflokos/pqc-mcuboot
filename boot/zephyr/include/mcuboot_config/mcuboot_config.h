@@ -27,6 +27,25 @@
 #define MCUBOOT_SIGN_ED25519
 #endif
 
+#ifdef CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
+#define MCUBOOT_SIGN_MLDSA
+#  if !defined(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL)
+#    error "ML-DSA level must be configured"
+#  elif (CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL != 44 && \
+         CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL != 65 && \
+         CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL != 87)
+#    error "Invalid ML-DSA level (must be 44, 65, or 87)"
+#  else
+#    define MCUBOOT_MLDSA_LEVEL CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL
+#  endif
+#  ifdef CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY
+#    define MCUBOOT_SIGN_MLDSA_PQC_ONLY
+#    if defined(MCUBOOT_SIGN_RSA) || defined(MCUBOOT_SIGN_EC256) || defined(MCUBOOT_SIGN_ED25519)
+#      error "BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY requires BOOT_SIGNATURE_TYPE_NONE (no classical algorithm selected)"
+#    endif
+#  endif
+#endif
+
 #if defined(CONFIG_BOOT_USE_TINYCRYPT)
 #  if defined(CONFIG_MBEDTLS) || defined(CONFIG_BOOT_USE_CC310)
 #     error "One crypto library implementation allowed at a time."

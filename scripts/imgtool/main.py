@@ -70,6 +70,18 @@ def gen_x25519(keyfile, passwd):
     keys.X25519.generate().export_private(path=keyfile, passwd=passwd)
 
 
+def gen_mldsa44(keyfile, passwd):
+    keys.MLDSA44.generate().export_private(path=keyfile, passwd=passwd)
+
+
+def gen_mldsa65(keyfile, passwd):
+    keys.MLDSA65.generate().export_private(path=keyfile, passwd=passwd)
+
+
+def gen_mldsa87(keyfile, passwd):
+    keys.MLDSA87.generate().export_private(path=keyfile, passwd=passwd)
+
+
 valid_langs = ['c', 'rust']
 valid_hash_encodings = ['lang-c', 'raw']
 valid_encodings = ['lang-c', 'lang-rust', 'pem', 'raw']
@@ -80,6 +92,9 @@ keygens = {
     'ecdsa-p384': gen_ecdsa_p384,
     'ed25519':    gen_ed25519,
     'x25519':     gen_x25519,
+    'mldsa44':    gen_mldsa44,
+    'mldsa65':    gen_mldsa65,
+    'mldsa87':    gen_mldsa87,
 }
 valid_formats = ['openssl', 'pkcs8']
 valid_sha = [ 'auto', '256', '384', '512' ]
@@ -422,6 +437,11 @@ class BasedIntParamType(click.ParamType):
               default='hash', help='In what format to add the public key to '
               'the image manifest: full key or hash of the key.')
 @click.option('-k', '--key', metavar='filename')
+@click.option('--pqc-key', metavar='filename', default=None,
+              help='ML-DSA private/public key file. When combined with -k, '
+              'the image is signed with both keys (hybrid classical + '
+              'post-quantum signing): both signatures must independently '
+              'verify for the bootloader to accept the image.')
 @click.option('--fix-sig', metavar='filename',
               help='fixed signature for the image. It will be used instead of '
               'the signature calculated using the public key')
@@ -456,7 +476,7 @@ def sign(key, public_key_format, align, version, pad_sig, header_size,
          dependencies, load_addr, hex_addr, erased_val, save_enctlv,
          security_counter, boot_record, custom_tlv, rom_fixed, max_align,
          clear, fix_sig, fix_sig_pubkey, sig_out, user_sha, hmac_sha, is_pure,
-         vector_to_sign, non_bootable, vid, cid):
+         vector_to_sign, non_bootable, vid, cid, pqc_key):
 
     if confirm or test:
         # Confirmed but non-padded images don't make much sense, because
@@ -473,6 +493,7 @@ def sign(key, public_key_format, align, version, pad_sig, header_size,
     compression_tlvs = {}
     img.load(infile)
     key = load_key(key) if key else None
+    key2 = load_key(pqc_key) if pqc_key else None
     enckey = load_key(encrypt) if encrypt else None
     if enckey and key and ((isinstance(key, keys.ECDSA256P1) and
          not isinstance(enckey, keys.ECDSA256P1Public))
@@ -531,7 +552,8 @@ def sign(key, public_key_format, align, version, pad_sig, header_size,
         img.create(key, public_key_format, enckey, dependencies, boot_record,
                custom_tlvs, compression_tlvs, None, int(encrypt_keylen), clear,
                baked_signature, pub_key, vector_to_sign, user_sha=user_sha,
-               hmac_sha=hmac_sha, is_pure=is_pure, keep_comp_size=False, dont_encrypt=True)
+               hmac_sha=hmac_sha, is_pure=is_pure, keep_comp_size=False, dont_encrypt=True,
+               key2=key2)
         compressed_img = image.Image(version=decode_version(version),
                   header_size=header_size, pad_header=pad_header,
                   pad=pad, confirm=confirm, align=int(align),
@@ -577,13 +599,13 @@ def sign(key, public_key_format, align, version, pad_sig, header_size,
                dependencies, boot_record, custom_tlvs, compression_tlvs,
                compression, int(encrypt_keylen), clear, baked_signature,
                pub_key, vector_to_sign, user_sha=user_sha, hmac_sha=hmac_sha,
-               is_pure=is_pure, keep_comp_size=keep_comp_size)
+               is_pure=is_pure, keep_comp_size=keep_comp_size, key2=key2)
             img = compressed_img
     else:
         img.create(key, public_key_format, enckey, dependencies, boot_record,
                custom_tlvs, compression_tlvs, None, int(encrypt_keylen), clear,
                baked_signature, pub_key, vector_to_sign, user_sha=user_sha,
-               hmac_sha=hmac_sha, is_pure=is_pure)
+               hmac_sha=hmac_sha, is_pure=is_pure, key2=key2)
     img.save(outfile, hex_addr)
     if sig_out is not None:
         new_signature = img.get_signature()

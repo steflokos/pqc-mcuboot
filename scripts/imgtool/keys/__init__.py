@@ -28,11 +28,18 @@ from cryptography.hazmat.primitives.asymmetric.ec import (
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey, RSAPublicKey
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
+from cryptography.hazmat.primitives.asymmetric.mldsa import (
+    MLDSA44PrivateKey, MLDSA44PublicKey,
+    MLDSA65PrivateKey, MLDSA65PublicKey,
+    MLDSA87PrivateKey, MLDSA87PublicKey,
+)
 
 from .ecdsa import ECDSA256P1, ECDSA384P1, ECDSA256P1Public, ECDSA384P1Public, ECDSAUsageError
 from .ed25519 import Ed25519, Ed25519Public, Ed25519UsageError
 from .rsa import RSA, RSA_KEY_SIZES, RSAPublic, RSAUsageError
 from .x25519 import X25519, X25519Public, X25519UsageError
+from .mldsa import (MLDSA44, MLDSA65, MLDSA87, MLDSA44Public, MLDSA65Public,
+                     MLDSA87Public, MLDSAUsageError)
 
 __all__ = [
     "ECDSA256P1",
@@ -50,6 +57,13 @@ __all__ = [
     "X25519",
     "X25519Public",
     "X25519UsageError",
+    "MLDSA44",
+    "MLDSA65",
+    "MLDSA87",
+    "MLDSA44Public",
+    "MLDSA65Public",
+    "MLDSA87Public",
+    "MLDSAUsageError",
 ]
 
 
@@ -116,5 +130,17 @@ def load(path, passwd=None):
         return X25519(pk)
     elif isinstance(pk, X25519PublicKey):
         return X25519Public(pk)
+    elif isinstance(pk, MLDSA44PrivateKey):
+        return MLDSA44(pk)
+    elif isinstance(pk, MLDSA44PublicKey):
+        return MLDSA44Public(pk)
+    elif isinstance(pk, MLDSA65PrivateKey):
+        return MLDSA65(pk)
+    elif isinstance(pk, MLDSA65PublicKey):
+        return MLDSA65Public(pk)
+    elif isinstance(pk, MLDSA87PrivateKey):
+        return MLDSA87(pk)
+    elif isinstance(pk, MLDSA87PublicKey):
+        return MLDSA87Public(pk)
     else:
         raise Exception("Unknown key type: " + str(type(pk)))

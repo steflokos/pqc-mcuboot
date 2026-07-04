@@ -384,6 +384,71 @@ endif
 
 endchoice
 
+config BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
+	bool "Enable ML-DSA (post-quantum, FIPS 204) signature verification"
+	select MBEDTLS_ASN1_PARSE_C if MBEDTLS_BUILTIN && !BOOT_KEY_IMPORT_BYPASS_ASN
+	select BOOT_IMG_HASH_ALG_SHA256_ALLOW
+	help
+	  Enables ML-DSA post-quantum signature verification, in addition to
+	  (hybrid mode, the default) or instead of (PQC-only mode, see
+	  BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY below) the classical signature
+	  type selected above. In hybrid mode both the classical signature
+	  and the ML-DSA signature must independently verify for boot to
+	  succeed.
+
+if BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
+
+choice BOOT_SIGNATURE_TYPE_MLDSA_LEVEL_CHOICE
+	prompt "ML-DSA parameter set"
+	default BOOT_SIGNATURE_TYPE_MLDSA_44
+
+config BOOT_SIGNATURE_TYPE_MLDSA_44
+	bool "ML-DSA-44 (NIST security category 2, smallest/fastest)"
+
+config BOOT_SIGNATURE_TYPE_MLDSA_65
+	bool "ML-DSA-65 (NIST security category 3)"
+
+config BOOT_SIGNATURE_TYPE_MLDSA_87
+	bool "ML-DSA-87 (NIST security category 5, largest/slowest)"
+
+endchoice # BOOT_SIGNATURE_TYPE_MLDSA_LEVEL_CHOICE
+
+config BOOT_SIGNATURE_TYPE_MLDSA_LEVEL
+	int
+	default 44 if BOOT_SIGNATURE_TYPE_MLDSA_44
+	default 65 if BOOT_SIGNATURE_TYPE_MLDSA_65
+	default 87 if BOOT_SIGNATURE_TYPE_MLDSA_87
+
+config BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY
+	bool "PQC-only mode (disable classical signature requirement)"
+	help
+	  When enabled, only the ML-DSA signature is required to boot; pair
+	  this with BOOT_SIGNATURE_TYPE_NONE above (no classical algorithm
+	  selected). When disabled (default), hybrid mode is used: both the
+	  classical signature and the ML-DSA signature must independently
+	  verify for boot to succeed.
+
+config BOOT_SIGNATURE_MLDSA_KEY_FILE
+	string "ML-DSA PEM key file"
+	default "root-mldsa44.pem" if BOOT_SIGNATURE_TYPE_MLDSA_44
+	default "root-mldsa65.pem" if BOOT_SIGNATURE_TYPE_MLDSA_65
+	default "root-mldsa87.pem" if BOOT_SIGNATURE_TYPE_MLDSA_87
+	default ""
+	help
+	  PEM file containing the ML-DSA key pair used to verify (or, via
+	  imgtool getpub, generate the embedded public key for) the ML-DSA
+	  signature. Same path-resolution rules as BOOT_SIGNATURE_KEY_FILE.
+
+	  Note: ML-DSA verification uses a large amount of stack (roughly
+	  9-13KB for ML-DSA-44 up to ML-DSA-87 with reduced-RAM mode, more
+	  without). Ensure CONFIG_MAIN_STACK_SIZE (or the equivalent thread
+	  stack for whichever thread performs image validation) is sized
+	  accordingly for your board -- this is not defaulted automatically
+	  here since it depends on the toolchain, optimization level, and
+	  what else already runs on that stack.
+
+endif # BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
+
 config BOOT_BYPASS_KEY_MATCH
 	bool "Do not match TLV key hash against built in key"
 	depends on !BOOT_SIGNATURE_TYPE_NONE

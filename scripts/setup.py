@@ -14,7 +14,7 @@ setuptools.setup(
     packages=setuptools.find_packages(),
     python_requires='>=3.6',
     install_requires=[
-        'cryptography>=40.0.0',
+        'cryptography>=47.0.0',
         'intelhex>=2.2.1',
         'click',
         'cbor2',

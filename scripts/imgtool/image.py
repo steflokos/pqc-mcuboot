@@ -79,6 +79,9 @@ TLV_VALUES = {
         'RSA3072': 0x23,
         'ED25519': 0x24,
         'SIG_PURE': 0x25,
+        'MLDSA44': 0x26,
+        'MLDSA65': 0x27,
+        'MLDSA87': 0x28,
         'ENCRSA2048': 0x30,
         'ENCKW': 0x31,
         'ENCEC256': 0x32,
@@ -195,7 +198,13 @@ ALLOWED_KEY_SHA = {
     # This two are set to 256 for compatibility, the right would be 512
     keys.Ed25519            : ['256', '512'],
     keys.Ed25519Public      : ['256', '512'],
-    keys.X25519             : ['256', '512']
+    keys.X25519             : ['256', '512'],
+    keys.MLDSA44            : ['256'],
+    keys.MLDSA44Public      : ['256'],
+    keys.MLDSA65            : ['256'],
+    keys.MLDSA65Public      : ['256'],
+    keys.MLDSA87            : ['256'],
+    keys.MLDSA87Public      : ['256'],
 }
 
 ALLOWED_PURE_KEY_SHA = {
@@ -517,7 +526,7 @@ class Image:
                compression_type=None, encrypt_keylen=128, clear=False,
                fixed_sig=None, pub_key=None, vector_to_sign=None,
                user_sha='auto', hmac_sha='auto', is_pure=False, keep_comp_size=False,
-               dont_encrypt=False):
+               dont_encrypt=False, key2=None):
         self.enckey = enckey
 
         # key decides on sha, then pub_key; of both are none default is used
@@ -737,6 +746,39 @@ class Image:
                 raise click.UsageError(
                     "Can not sign using key and provide fixed-signature at the same time"
                 )
+
+        if key2 is not None:
+            # Hybrid mode: a second (ML-DSA) signature is added over the
+            # same image hash, immediately following the primary key's
+            # KEYHASH/PUBKEY+SIGNATURE TLV pair above. The bootloader's TLV
+            # walk resolves key_id fresh before each signature, so each
+            # KEYHASH/PUBKEY must immediately precede its own signature.
+            if not isinstance(key2, (keys.MLDSA44, keys.MLDSA65, keys.MLDSA87)):
+                raise click.UsageError(
+                    "--pqc-key must be an ML-DSA private key"
+                )
+            if key is None:
+                raise click.UsageError(
+                    "--pqc-key requires a primary key (-k) for hybrid signing"
+                )
+            if is_pure:
+                raise click.UsageError(
+                    "--pqc-key (hybrid ML-DSA signing) is not supported "
+                    "together with --pure"
+                )
+
+            pub2 = key2.get_public_bytes()
+            sha2 = hash_algorithm()
+            sha2.update(pub2)
+            pubbytes2 = sha2.digest()
+            if public_key_format == 'hash':
+                tlv.add('KEYHASH', pubbytes2)
+            else:
+                tlv.add('PUBKEY', pub2)
+
+            print(os.path.basename(__file__) + ": sign the digest (ML-DSA)")
+            sig2 = key2.sign_digest(message)
+            tlv.add(key2.sig_tlv(), sig2)
 
         # At this point the image was hashed + signed, we can remove the
         # protected TLVs from the payload (will be re-added later)

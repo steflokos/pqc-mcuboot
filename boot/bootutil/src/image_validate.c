@@ -92,6 +92,46 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #    define SIG_BUF_SIZE 32 /* no signing, sha256 digest only */
 #endif
 
+#if defined(MCUBOOT_SIGN_MLDSA)
+#    if MCUBOOT_MLDSA_LEVEL == 44
+#        define EXPECTED_SIG_TLV_MLDSA IMAGE_TLV_MLDSA44_SIG
+#        define MLDSA_SIG_BUF_SIZE 2420
+#    elif MCUBOOT_MLDSA_LEVEL == 65
+#        define EXPECTED_SIG_TLV_MLDSA IMAGE_TLV_MLDSA65_SIG
+#        define MLDSA_SIG_BUF_SIZE 3309
+#    elif MCUBOOT_MLDSA_LEVEL == 87
+#        define EXPECTED_SIG_TLV_MLDSA IMAGE_TLV_MLDSA87_SIG
+#        define MLDSA_SIG_BUF_SIZE 4627
+#    else
+#        error "Unsupported MCUBOOT_MLDSA_LEVEL (must be 44, 65, or 87)"
+#    endif
+#    define EXPECTED_MLDSA_SIG_LEN(x) ((x) == MLDSA_SIG_BUF_SIZE)
+#    if !defined(EXPECTED_SIG_TLV)
+/*
+ * PQC-only mode: no classical algorithm is compiled in. Reuse the
+ * single-signature code path below unchanged by aliasing the "classical"
+ * macros and bootutil_verify_sig() itself to the ML-DSA ones.
+ */
+#        define EXPECTED_SIG_TLV EXPECTED_SIG_TLV_MLDSA
+#        undef SIG_BUF_SIZE /* was defined to 32 (no-signing default) above */
+#        define SIG_BUF_SIZE MLDSA_SIG_BUF_SIZE
+#        define EXPECTED_SIG_LEN(x) EXPECTED_MLDSA_SIG_LEN(x)
+#        define bootutil_verify_sig bootutil_verify_sig_mldsa
+#    else
+/*
+ * Hybrid mode: both a classical algorithm and ML-DSA are compiled in, and
+ * both TLVs are verified independently (see MCUBOOT_SIGN_MLDSA_HYBRID
+ * below). Make sure the shared signature scratch buffer is big enough for
+ * the larger of the two signature types.
+ */
+#        define MCUBOOT_SIGN_MLDSA_HYBRID
+#        if MLDSA_SIG_BUF_SIZE > SIG_BUF_SIZE
+#            undef SIG_BUF_SIZE
+#            define SIG_BUF_SIZE MLDSA_SIG_BUF_SIZE
+#        endif
+#    endif
+#endif /* MCUBOOT_SIGN_MLDSA */
+
 #if (defined(MCUBOOT_HW_KEY)       + \
      defined(MCUBOOT_BUILTIN_KEY)) > 1
 #error "Please use either MCUBOOT_HW_KEY or the MCUBOOT_BUILTIN_KEY feature."
@@ -180,6 +220,9 @@ static const uint16_t allowed_unprot_tlvs[] = {
 #if defined(MCUBOOT_SIGN_PURE)
      IMAGE_TLV_SIG_PURE,
 #endif
+#if defined(MCUBOOT_SIGN_MLDSA)
+     EXPECTED_SIG_TLV_MLDSA,
+#endif
      IMAGE_TLV_ENC_RSA2048,
      IMAGE_TLV_ENC_KW,
      IMAGE_TLV_ENC_EC256,
@@ -228,6 +271,9 @@ bootutil_img_validate(struct boot_loader_state *state,
     uint8_t key_buf[KEY_BUF_SIZE];
 #endif
 #endif /* EXPECTED_SIG_TLV */
+#ifdef MCUBOOT_SIGN_MLDSA_HYBRID
+    FIH_DECLARE(valid_signature_mldsa, FIH_FAILURE);
+#endif
     struct image_tlv_iter it;
     uint8_t buf[SIG_BUF_SIZE];
 #if defined(EXPECTED_HASH_TLV) && !defined(MCUBOOT_SIGN_PURE)
@@ -430,6 +476,33 @@ bootutil_img_validate(struct boot_loader_state *state,
             break;
         }
 #endif /* EXPECTED_SIG_TLV */
+#ifdef MCUBOOT_SIGN_MLDSA_HYBRID
+#if defined(MCUBOOT_SIGN_PURE)
+#error "MCUBOOT_SIGN_PURE is not supported together with hybrid ML-DSA signing"
+#endif
+        case EXPECTED_SIG_TLV_MLDSA:
+        {
+            BOOT_LOG_DBG("bootutil_img_validate: EXPECTED_SIG_TLV_MLDSA == %d",
+                         EXPECTED_SIG_TLV_MLDSA);
+            /* Ignore this signature if it is out of bounds. */
+            if (key_id < 0 || key_id >= bootutil_key_cnt) {
+                key_id = -1;
+                continue;
+            }
+            if (!EXPECTED_MLDSA_SIG_LEN(len) || len > sizeof(buf)) {
+                rc = -1;
+                goto out;
+            }
+            rc = LOAD_IMAGE_DATA(hdr, fap, off, buf, len);
+            if (rc) {
+                goto out;
+            }
+            FIH_CALL(bootutil_verify_sig_mldsa, valid_signature_mldsa, hash,
+                     sizeof(hash), buf, len, key_id);
+            key_id = -1;
+            break;
+        }
+#endif /* MCUBOOT_SIGN_MLDSA_HYBRID */
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
         case IMAGE_TLV_SEC_CNT:
         {
@@ -557,6 +630,15 @@ bootutil_img_validate(struct boot_loader_state *state,
 #endif
 #ifdef EXPECTED_SIG_TLV
     FIH_SET(fih_rc, valid_signature);
+#endif
+#ifdef MCUBOOT_SIGN_MLDSA_HYBRID
+    /* Hybrid mode: the classical signature (checked above) and the ML-DSA
+     * signature are independently required. Either one failing rejects the
+     * image; a single fault cannot bypass both checks at once. */
+    if (FIH_NOT_EQ(valid_signature_mldsa, FIH_SUCCESS)) {
+        rc = -1;
+        goto out;
+    }
 #endif
 #ifdef MCUBOOT_HW_ROLLBACK_PROT
     if (FIH_NOT_EQ(security_counter_valid, FIH_SUCCESS)) {

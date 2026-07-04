@@ -290,6 +290,15 @@ struct boot_sector_buffer {
 fih_ret bootutil_verify_sig(uint8_t *msg, uint32_t mlen, uint8_t *sig,
                             size_t slen, uint8_t key_id);
 
+#if defined(MCUBOOT_SIGN_MLDSA)
+/* ML-DSA (FIPS 204) verification, exported under its own name (rather than
+ * bootutil_verify_sig) so that a classical algorithm and ML-DSA can both be
+ * linked into the same hybrid build. See image_mldsa.c.
+ */
+fih_ret bootutil_verify_sig_mldsa(uint8_t *msg, uint32_t mlen, uint8_t *sig,
+                                  size_t slen, uint8_t key_id);
+#endif
+
 fih_ret boot_fih_memequal(const void *s1, const void *s2, size_t n);
 
 const struct flash_area *boot_find_status(const struct boot_loader_state *state,

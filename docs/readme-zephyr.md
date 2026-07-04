@@ -156,11 +156,54 @@ the public key in a format usable by the C compiler.
 The generated public key is saved in `build/zephyr/autogen-pubkey.h`, which is included
 by the `boot/zephyr/keys.c`.
 
-Currently, the Zephyr RTOS port limits its support to one keypair at the time,
-although MCUboot's key management infrastructure supports multiple keypairs.
+Currently, the Zephyr RTOS port limits its support to one classical keypair at
+a time, although MCUboot's key management infrastructure supports multiple
+keypairs. The exception is ML-DSA (see below), which can be layered on top of
+a classical keypair for hybrid post-quantum signing.
 
 Once MCUboot is built, this new keypair file (`mykey.pem` in this
 example) can be used to sign images.
+
+### ML-DSA (post-quantum) and hybrid signing
+
+In addition to the classical signature types above, MCUboot can verify
+ML-DSA (FIPS 204) post-quantum signatures, using the `mldsa-native`
+reference implementation vendored as the `ext/mldsa-native` submodule
+(run `git submodule update --init ext/mldsa-native` if it is empty).
+
+Enable `CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE` and pick a parameter set
+(`CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_44/65/87`, ML-DSA-44 being the smallest
+and fastest, ML-DSA-87 the largest and slowest). By default this runs in
+**hybrid mode**: both the classical signature selected via
+`BOOT_SIGNATURE_TYPE` (RSA/ECDSA/ED25519) and the ML-DSA signature must
+independently verify for boot to succeed. Set
+`CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY=y` together with
+`CONFIG_BOOT_SIGNATURE_TYPE_NONE=y` to use ML-DSA alone instead.
+
+Generate an ML-DSA keypair the same way as any other key type:
+
+```
+    $ ./scripts/imgtool.py keygen -k my-mldsa-key.pem -t mldsa44
+```
+
+and point `CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE` at it (mirrors
+`CONFIG_BOOT_SIGNATURE_KEY_FILE` for the classical key). When signing an
+image for hybrid mode, pass both keys:
+
+```
+    $ ./scripts/imgtool.py sign ... -k my-classical-key.pem --pqc-key my-mldsa-key.pem app.bin signed-app.bin
+```
+
+For PQC-only mode, pass only the ML-DSA key with `-k`.
+
+ML-DSA signature verification uses considerably more stack than the
+classical algorithms (roughly 9-13KB for the reduced-RAM configuration
+MCUboot defaults to, more without it), and the embedded keys/signatures
+are much larger (1312-2592 byte public keys, 2420-4627 byte signatures,
+depending on parameter set). Ensure the bootloader's stack size
+(`CONFIG_MAIN_STACK_SIZE` or equivalent) and the target's flash budget are
+sized accordingly, and validate empirically on real hardware -- do not
+assume the defaults are sufficient for every board/toolchain combination.
 
 ## Using swap-using-scratch flash algorithm
 

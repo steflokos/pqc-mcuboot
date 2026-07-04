@@ -30,6 +30,11 @@ assert_exists(TINYCRYPT_SHA512_DIR)
 # Path to crypto-fiat
 set(FIAT_DIR "${MCUBOOT_DIR}/ext/fiat")
 assert_exists(FIAT_DIR)
+# Path to mldsa-native (ML-DSA / FIPS 204 post-quantum signatures).
+set(MLDSA_NATIVE_DIR "${MCUBOOT_DIR}/ext/mldsa-native")
+if(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE)
+  assert_exists(MLDSA_NATIVE_DIR)
+endif()
 # Path to mbed-tls' asn1 parser library.
 if(NOT CONFIG_MBEDTLS_BUILTIN AND NOT CONFIG_BOOT_KEY_IMPORT_BYPASS_ASN)
   set(MBEDTLS_ASN1_DIR "${MCUBOOT_DIR}/ext/mbedtls-asn1")
@@ -88,6 +93,7 @@ zephyr_sources(
   ${BOOT_DIR}/bootutil/src/image_rsa.c
   ${BOOT_DIR}/bootutil/src/image_ecdsa.c
   ${BOOT_DIR}/bootutil/src/image_ed25519.c
+  ${BOOT_DIR}/bootutil/src/image_mldsa.c
   ${BOOT_DIR}/bootutil/src/bootutil_misc.c
   ${BOOT_DIR}/bootutil/src/bootutil_area.c
   ${BOOT_DIR}/bootutil/src/bootutil_loader.c
@@ -261,6 +267,30 @@ elseif(CONFIG_BOOT_SIGNATURE_TYPE_ED25519 OR CONFIG_BOOT_ENCRYPT_X25519)
   endif()
 endif()
 
+if(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE)
+  # ML-DSA is orthogonal to the classical BOOT_SIGNATURE_TYPE choice above
+  # (it can be layered on top for hybrid verification, or used alone in
+  # PQC-only mode), so this block is independent of the elseif chain.
+  if(NOT CONFIG_BOOT_KEY_IMPORT_BYPASS_ASN AND MBEDTLS_ASN1_DIR)
+    zephyr_include_directories(${MBEDTLS_ASN1_DIR}/include)
+    zephyr_sources(
+      ${MBEDTLS_ASN1_DIR}/src/asn1parse.c
+      ${MBEDTLS_ASN1_DIR}/src/platform_util.c
+    )
+  endif()
+
+  # ${BOOT_DIR}/bootutil/include (for mcuboot_mldsa_config.h) is already on
+  # the include path via the generic bootutil block above.
+  zephyr_include_directories(${MLDSA_NATIVE_DIR})
+  zephyr_sources(
+    ${MLDSA_NATIVE_DIR}/mldsa/mldsa_native.c
+  )
+  zephyr_compile_definitions(
+    MLD_CONFIG_FILE="mcuboot_mldsa_config.h"
+    MLD_CONFIG_PARAMETER_SET=${CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_LEVEL}
+  )
+endif()
+
 if(NOT CONFIG_BOOT_ED25519_PSA AND NOT CONFIG_BOOT_ECDSA_PSA)
   if(CONFIG_BOOT_USE_TINYCRYPT)
     if(CONFIG_BOOT_ENCRYPT_EC256 OR CONFIG_BOOT_ENCRYPT_X25519)
@@ -313,6 +343,19 @@ if(CONFIG_MCUBOOT_SERIAL)
   endif()
 endif()
 
+set(mcuboot_default_signature_files
+  ${MCUBOOT_DIR}/root-ec-p256-pkcs8.pem
+  ${MCUBOOT_DIR}/root-ec-p384.pem
+  ${MCUBOOT_DIR}/root-ec-p384-pkcs8.pem
+  ${MCUBOOT_DIR}/root-ed25519.pem
+  ${MCUBOOT_DIR}/root-rsa-2048.pem
+  ${MCUBOOT_DIR}/root-rsa-3072.pem
+  ${MCUBOOT_DIR}/root-ec-p256.pem
+  ${MCUBOOT_DIR}/root-mldsa44.pem
+  ${MCUBOOT_DIR}/root-mldsa65.pem
+  ${MCUBOOT_DIR}/root-mldsa87.pem
+)
+
 if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
   set(key_file "${CONFIG_BOOT_SIGNATURE_KEY_FILE}")
   string(CONFIGURE "${key_file}" key_file)
@@ -325,16 +368,6 @@ if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_SIGNATURE_KEY_FILE ST
     set(signing_key_file ${MCUBOOT_DIR}/${key_file})
   endif()
   message("MCUBoot bootloader key file: ${signing_key_file}")
-
-  set(mcuboot_default_signature_files
-    ${MCUBOOT_DIR}/root-ec-p256-pkcs8.pem
-    ${MCUBOOT_DIR}/root-ec-p384.pem
-    ${MCUBOOT_DIR}/root-ec-p384-pkcs8.pem
-    ${MCUBOOT_DIR}/root-ed25519.pem
-    ${MCUBOOT_DIR}/root-rsa-2048.pem
-    ${MCUBOOT_DIR}/root-rsa-3072.pem
-    ${MCUBOOT_DIR}/root-ec-p256.pem
-  )
 
   # Emit a warning if using one of the default MCUboot key files
   if(${signing_key_file} IN_LIST mcuboot_default_signature_files)
@@ -355,6 +388,40 @@ if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_SIGNATURE_KEY_FILE ST
   )
   target_sources(app PRIVATE
     ${generated_pubkey}
+  )
+endif()
+
+if(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE AND NOT CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE STREQUAL "")
+  set(key_file "${CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE}")
+  string(CONFIGURE "${key_file}" key_file)
+
+  if(IS_ABSOLUTE ${key_file})
+    set(signing_key_file_mldsa ${key_file})
+  elseif(EXISTS ${APPLICATION_CONFIG_DIR}/${key_file})
+    set(signing_key_file_mldsa ${APPLICATION_CONFIG_DIR}/${key_file})
+  else()
+    set(signing_key_file_mldsa ${MCUBOOT_DIR}/${key_file})
+  endif()
+  message("MCUBoot bootloader ML-DSA key file: ${signing_key_file_mldsa}")
+
+  if(${signing_key_file_mldsa} IN_LIST mcuboot_default_signature_files)
+    message(WARNING "WARNING: Using default MCUboot ML-DSA signing key file, this file is for debug use only and is not secure!")
+  endif()
+
+  set(generated_pubkey_mldsa ${ZEPHYR_BINARY_DIR}/autogen-pubkey-mldsa.c)
+  add_custom_command(
+    OUTPUT ${generated_pubkey_mldsa}
+    COMMAND
+    ${PYTHON_EXECUTABLE}
+    ${MCUBOOT_DIR}/scripts/imgtool.py
+    getpub
+    -k
+    ${signing_key_file_mldsa}
+    > ${generated_pubkey_mldsa}
+    DEPENDS ${signing_key_file_mldsa}
+  )
+  target_sources(app PRIVATE
+    ${generated_pubkey_mldsa}
   )
 endif()
 
