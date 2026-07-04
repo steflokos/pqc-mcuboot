@@ -64,6 +64,7 @@ zephyr_include_directories(include)
 if(DEFINED CONFIG_MBEDTLS)
   zephyr_include_directories(
     ${ZEPHYR_MBEDTLS_MODULE_DIR}/include
+    ${ZEPHYR_MBEDTLS_MODULE_DIR}/library
   )
 endif()
 
@@ -201,11 +202,11 @@ if(CONFIG_BOOT_SIGNATURE_TYPE_ECDSA_P256 OR CONFIG_BOOT_ENCRYPT_EC256)
     zephyr_link_libraries(nrfxlib_crypto)
   endif()
 
-  if(CONFIG_MBEDTLS_CFG_FILE)
+  if(CONFIG_MBEDTLS_CONFIG_FILE)
     # Since here we are not using Zephyr's mbedTLS but rather our own, we need
     # to set MBEDTLS_CONFIG_FILE ourselves. When using Zephyr's copy, this
     # variable is set by its Kconfig in the Zephyr codebase.
-    zephyr_compile_definitions(MBEDTLS_CONFIG_FILE="${CONFIG_MBEDTLS_CFG_FILE}")
+    zephyr_compile_definitions(MBEDTLS_CONFIG_FILE="${CONFIG_MBEDTLS_CONFIG_FILE}")
   endif()
 elseif(CONFIG_BOOT_SIGNATURE_TYPE_NONE)
   zephyr_include_directories(
@@ -248,7 +249,7 @@ elseif(CONFIG_BOOT_SIGNATURE_TYPE_ED25519 OR CONFIG_BOOT_ENCRYPT_X25519)
       ${TINYCRYPT_DIR}/source/utils.c
       ${TINYCRYPT_SHA512_DIR}/source/sha512.c
     )
-    zephyr_compile_definitions(MBEDTLS_CONFIG_FILE="${CONFIG_MBEDTLS_CFG_FILE}")
+    zephyr_compile_definitions(MBEDTLS_CONFIG_FILE="${CONFIG_MBEDTLS_CONFIG_FILE}")
   endif()
 
   zephyr_include_directories(
@@ -356,7 +357,8 @@ set(mcuboot_default_signature_files
   ${MCUBOOT_DIR}/root-mldsa87.pem
 )
 
-if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
+if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_BUILTIN_KEY AND NOT
+  CONFIG_BOOT_SIGNATURE_KEY_FILE STREQUAL "")
   set(key_file "${CONFIG_BOOT_SIGNATURE_KEY_FILE}")
   string(CONFIGURE "${key_file}" key_file)
 
@@ -391,7 +393,8 @@ if(NOT CONFIG_BOOT_SIGNATURE_TYPE_NONE AND NOT CONFIG_BOOT_SIGNATURE_KEY_FILE ST
   )
 endif()
 
-if(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE AND NOT CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE STREQUAL "")
+if(CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_ENABLE AND NOT CONFIG_BOOT_BUILTIN_KEY AND NOT
+  CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE STREQUAL "")
   set(key_file "${CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE}")
   string(CONFIGURE "${key_file}" key_file)
 
@@ -491,23 +494,59 @@ function(align_up num align result)
   set(${result} "${out}" PARENT_SCOPE)
 endfunction()
 
-function(dt_get_parent node)
-  string(FIND "${${node}}" "/" pos REVERSE)
+# Takes a node path to a partition and goes up until a parent with the soc-nv-flash compatible
+# is found, then reads the erase and write block sizes from it
+function(dt_get_erase_write_block_sizes node erase_block_size write_block_size)
+  string(FIND "${node}" "/" node_first_slash)
+  string(FIND "${node}" "/" node_final_slash REVERSE)
+  string(SUBSTRING "${node}" 0 ${node_final_slash} current_path)
 
-  if(pos EQUAL -1)
-    message(FATAL_ERROR "Unable to get parent of node: ${${node}}")
-  endif()
+  while(${node_final_slash} GREATER ${node_first_slash})
+    set(current_compatible)
+    dt_prop(current_compatible PATH "${current_path}" PROPERTY "compatible")
 
-  string(SUBSTRING "${${node}}" 0 ${pos} ${node})
-  set(${node} "${${node}}" PARENT_SCOPE)
+    if("soc-nv-flash" IN_LIST current_compatible)
+      dt_prop(erase_size PATH "${current_path}" PROPERTY "erase-block-size")
+      dt_prop(write_size PATH "${current_path}" PROPERTY "write-block-size")
+      set(${erase_block_size} ${erase_size} PARENT_SCOPE)
+      set(${write_block_size} ${write_size} PARENT_SCOPE)
+      break()
+    endif()
+
+    string(FIND "${current_path}" "/" node_final_slash REVERSE)
+    string(SUBSTRING "${current_path}" 0 ${node_final_slash} current_path)
+  endwhile()
+endfunction()
+
+# Takes a node path to a partition and goes up until a parent with the soc-nv-flash compatible
+# is found, then returns the path for that device
+function(dt_get_nvm_device node nvm_device)
+  string(FIND "${node}" "/" node_first_slash)
+  string(FIND "${node}" "/" node_final_slash REVERSE)
+  string(SUBSTRING "${node}" 0 ${node_final_slash} current_path)
+
+  while(${node_final_slash} GREATER ${node_first_slash})
+    set(current_compatible)
+    dt_prop(current_compatible PATH "${current_path}" PROPERTY "compatible")
+
+    if("soc-nv-flash" IN_LIST current_compatible)
+      set(${nvm_device} ${current_path} PARENT_SCOPE)
+      break()
+    elseif("fixed-partitions" IN_LIST current_compatible)
+      string(FIND "${current_path}" "/" node_final_slash REVERSE)
+      string(SUBSTRING "${current_path}" 0 ${node_final_slash} current_path)
+      set(${nvm_device} ${current_path} PARENT_SCOPE)
+      break()
+    endif()
+
+    string(FIND "${current_path}" "/" node_final_slash REVERSE)
+    string(SUBSTRING "${current_path}" 0 ${node_final_slash} current_path)
+  endwhile()
 endfunction()
 
 dt_nodelabel(slot0_flash NODELABEL "slot0_partition" REQUIRED)
 dt_prop(slot0_size PATH "${slot0_flash}" PROPERTY "reg" INDEX 1)
-dt_get_parent(slot0_flash)
-dt_get_parent(slot0_flash)
-dt_prop(erase_size_slot0 PATH "${slot0_flash}" PROPERTY "erase-block-size")
-dt_prop(write_size_slot0 PATH "${slot0_flash}" PROPERTY "write-block-size")
+dt_get_erase_write_block_sizes(${slot0_flash} erase_size_slot0 write_size_slot0)
 
 if(CONFIG_BOOT_SWAP_USING_MOVE OR CONFIG_BOOT_SWAP_USING_OFFSET)
   if(DEFINED erase_size_slot0)
@@ -522,10 +561,7 @@ endif()
 if(NOT CONFIG_SINGLE_APPLICATION_SLOT AND NOT CONFIG_SINGLE_APPLICATION_SLOT_RAM_LOAD)
   dt_nodelabel(slot1_flash NODELABEL "slot1_partition" REQUIRED)
   dt_prop(slot1_size PATH "${slot1_flash}" PROPERTY "reg" INDEX 1)
-  dt_get_parent(slot1_flash)
-  dt_get_parent(slot1_flash)
-  dt_prop(erase_size_slot1 PATH "${slot1_flash}" PROPERTY "erase-block-size")
-  dt_prop(write_size_slot1 PATH "${slot1_flash}" PROPERTY "write-block-size")
+  dt_get_erase_write_block_sizes(${slot0_flash} erase_size_slot1 write_size_slot1)
 
   if(CONFIG_BOOT_SWAP_USING_MOVE OR CONFIG_BOOT_SWAP_USING_OFFSET)
     if(DEFINED erase_size_slot1)
@@ -581,20 +617,18 @@ if(SYSBUILD)
   if(CONFIG_SINGLE_APPLICATION_SLOT OR CONFIG_BOOT_FIRMWARE_LOADER OR CONFIG_BOOT_SWAP_USING_SCRATCH OR CONFIG_BOOT_SWAP_USING_MOVE OR CONFIG_BOOT_SWAP_USING_OFFSET OR CONFIG_BOOT_UPGRADE_ONLY OR CONFIG_BOOT_DIRECT_XIP OR CONFIG_BOOT_RAM_LOAD)
     # TODO: RAM LOAD support
     dt_nodelabel(slot0_flash NODELABEL "slot0_partition" REQUIRED)
-    dt_get_parent(slot0_flash)
-    dt_get_parent(slot0_flash)
+    dt_get_nvm_device(${slot0_flash} slot0_device)
 
     if(NOT CONFIG_SINGLE_APPLICATION_SLOT)
       dt_nodelabel(slot1_flash NODELABEL "slot1_partition" REQUIRED)
-      dt_get_parent(slot1_flash)
-      dt_get_parent(slot1_flash)
+      dt_get_nvm_device(${slot1_flash} slot1_device)
 
-      if(NOT "${slot0_flash}" STREQUAL "${slot1_flash}")
+      if(NOT "${slot0_device}" STREQUAL "${slot1_device}")
         # Check both slots for the one with the largest write/erase block size
-        dt_prop(erase_size_slot0 PATH "${slot0_flash}" PROPERTY "erase-block-size")
-        dt_prop(write_size_slot0 PATH "${slot0_flash}" PROPERTY "write-block-size")
-        dt_prop(erase_size_slot1 PATH "${slot1_flash}" PROPERTY "erase-block-size")
-        dt_prop(write_size_slot1 PATH "${slot1_flash}" PROPERTY "write-block-size")
+        dt_prop(erase_size_slot0 PATH "${slot0_device}" PROPERTY "erase-block-size")
+        dt_prop(write_size_slot0 PATH "${slot0_device}" PROPERTY "write-block-size")
+        dt_prop(erase_size_slot1 PATH "${slot1_device}" PROPERTY "erase-block-size")
+        dt_prop(write_size_slot1 PATH "${slot1_device}" PROPERTY "write-block-size")
 
         if(DEFINED erase_size_slot0 AND DEFINED erase_size_slot1)
           if(${erase_size_slot0} GREATER ${erase_size_slot1})
@@ -620,12 +654,12 @@ if(SYSBUILD)
           set(write_size ${write_size_slot1})
         endif()
       else()
-        dt_prop(erase_size PATH "${slot0_flash}" PROPERTY "erase-block-size")
-        dt_prop(write_size PATH "${slot0_flash}" PROPERTY "write-block-size")
+        dt_prop(erase_size PATH "${slot0_device}" PROPERTY "erase-block-size")
+        dt_prop(write_size PATH "${slot0_device}" PROPERTY "write-block-size")
       endif()
     else()
-      dt_prop(erase_size PATH "${slot0_flash}" PROPERTY "erase-block-size")
-      dt_prop(write_size PATH "${slot0_flash}" PROPERTY "write-block-size")
+      dt_prop(erase_size PATH "${slot0_device}" PROPERTY "erase-block-size")
+      dt_prop(write_size PATH "${slot0_device}" PROPERTY "write-block-size")
     endif()
 
     if(NOT DEFINED erase_size)
