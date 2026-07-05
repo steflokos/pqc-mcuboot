@@ -217,6 +217,15 @@ environment (e.g. WSL) with no prior Zephyr setup.
 Everything is scoped to a single `~/zephyr-pqc` folder, so removal later is
 just `rm -rf ~/zephyr-pqc`.
 
+The manual steps below (`west init` against upstream Zephyr, then swapping
+this fork in for `bootloader/mcuboot`) can also be replaced with a single
+`west init -m https://github.com/steflokos/pqc-zephyr-manifest --mr main .`
+-- see [pqc-zephyr-manifest](https://github.com/steflokos/pqc-zephyr-manifest).
+That same workspace also picks up
+[pqc-zephyr-crypto](https://github.com/steflokos/pqc-zephyr-crypto), a
+companion module exposing ML-KEM/ML-DSA to Zephyr *applications* themselves
+(independent of the bootloader-side verification documented in this file).
+
 ```bash
 # System build dependencies
 sudo apt update && sudo apt install -y --no-install-recommends git cmake ninja-build \
