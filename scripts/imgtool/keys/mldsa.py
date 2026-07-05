@@ -32,7 +32,13 @@ class MLDSAPublic(KeyClass):
         self.key = key
 
     def shortname(self):
-        return f"mldsa{self._level}"
+        # Deliberately level-independent (unlike sig_tlv()/sig_type()):
+        # only one ML-DSA level is ever compiled into a given bootloader
+        # build (mutually-exclusive Kconfig choice), and boot/zephyr/keys.c
+        # declares a single `extern const unsigned char mldsa_pub_key[]`
+        # regardless of level -- matching the "ecdsa" (not "ecdsa256")
+        # precedent in keys/ecdsa.py for the same reason.
+        return "mldsa"
 
     def _unsupported(self, name):
         raise MLDSAUsageError(f"Operation {name} requires private key")
