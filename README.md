@@ -39,6 +39,22 @@ Currently, MCUboot works with the following operating systems and SoCs:
 RIOT is supported only as a boot target. We will accept any new
 port contributed by the community once it is good enough.
 
+## Post-quantum (ML-DSA) secure boot
+
+This fork adds ML-DSA (FIPS 204) post-quantum signature verification to the
+Zephyr port, alongside the classical signature types. Two modes:
+
+- **Hybrid** (default): both a classical signature (RSA/ECDSA/ED25519) and
+  an ML-DSA signature must independently verify for boot to succeed.
+- **PQC-only**: ML-DSA alone, no classical signature required.
+
+All three ML-DSA parameter sets (44/65/87) are selectable via Kconfig. See
+[docs/readme-zephyr.md](docs/readme-zephyr.md#ml-dsa-post-quantum-and-hybrid-signing)
+for the Kconfig options and imgtool usage, and
+[docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q](docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q)
+for a fully reproducible build/sign/flash/tamper-test walkthrough targeting
+the Arduino UNO Q (STM32U585).
+
 ## MCUboot How-tos
 
 See the following pages for instructions on using MCUboot with different

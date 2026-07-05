@@ -205,6 +205,177 @@ depending on parameter set). Ensure the bootloader's stack size
 sized accordingly, and validate empirically on real hardware -- do not
 assume the defaults are sufficient for every board/toolchain combination.
 
+## Testing on real hardware (Arduino UNO Q)
+
+This section is a fully reproducible, copy-pasteable walkthrough for
+building and testing the ML-DSA/hybrid signature verification above on the
+Arduino UNO Q's STM32U585 (Cortex-M33) MCU side. It assumes a Debian/Ubuntu
+environment (e.g. WSL) with no prior Zephyr setup.
+
+### One-time environment setup
+
+Everything is scoped to a single `~/zephyr-pqc` folder, so removal later is
+just `rm -rf ~/zephyr-pqc`.
+
+```bash
+# System build dependencies
+sudo apt update && sudo apt install -y --no-install-recommends git cmake ninja-build \
+    gperf ccache dfu-util device-tree-compiler wget python3-dev python3-pip \
+    python3-setuptools python3-tk python3-wheel xz-utils file make gcc \
+    libsdl2-dev libmagic1
+
+# Isolated Python venv + west
+mkdir -p ~/zephyr-pqc && cd ~/zephyr-pqc
+python3 -m venv .venv
+source .venv/bin/activate
+pip install west
+
+# West workspace from upstream Zephyr (>= v4.3.0 for arduino_uno_q board support)
+west init -m https://github.com/zephyrproject-rtos/zephyr --mr v4.3.0 .
+west update
+
+# Use requirements-base.txt, NOT the umbrella requirements.txt: the full
+# requirements.txt also pulls in requirements-compliance.txt (CI lint
+# tooling, irrelevant here), which needs hidapi/ruamel.yaml.clib -- packages
+# that may not have prebuilt wheels for very new Python versions and fail
+# to build from source. requirements-base.txt alone already has everything
+# actually needed to build/flash (including west, requests, patool).
+pip install -r zephyr/scripts/requirements-base.txt
+
+# Swap in this PQC fork in place of upstream mcuboot
+rm -rf bootloader/mcuboot
+git clone https://github.com/steflokos/pqc-mcuboot.git bootloader/mcuboot
+cd bootloader/mcuboot
+git submodule update --init ext/mldsa-native
+pip install -r scripts/requirements.txt
+cd ~/zephyr-pqc
+
+# Zephyr SDK, self-contained inside the same folder
+west sdk install --install-dir ~/zephyr-pqc/zephyr-sdk
+```
+
+If `west sdk install` fails for any reason, install the SDK manually instead
+(no Python involved; check
+[sdk-ng releases](https://github.com/zephyrproject-rtos/sdk-ng/releases)
+for the current version if `v1.0.1` below is no longer latest):
+
+```bash
+wget https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v1.0.1/zephyr-sdk-1.0.1_linux-x86_64_gnu.tar.xz
+tar xf zephyr-sdk-1.0.1_linux-x86_64_gnu.tar.xz
+cd zephyr-sdk-1.0.1 && ./setup.sh && cd ..
+```
+
+### Build and flash the bootloader
+
+Start with **PQC-only ML-DSA-44** (simplest case to reason about). The
+`overlay-mldsa44-pqconly.conf` file in `samples/zephyr/` in this repo
+carries the exact Kconfig settings, matching the existing
+`overlay-ecdsa-p256.conf`/`overlay-rsa.conf` convention:
+
+```bash
+cd ~/zephyr-pqc/bootloader/mcuboot/boot/zephyr
+west build -b arduino_uno_q -- \
+  -DEXTRA_CONF_FILE=$PWD/../../samples/zephyr/overlay-mldsa44-pqconly.conf
+```
+
+Confirm the build actually worked and ML-DSA got compiled in (this is the
+first-ever compile of `image_mldsa.c` and the mldsa-native amalgamation for
+Cortex-M33):
+
+```bash
+ls -la build/zephyr/zephyr.{elf,bin,hex}          # exist, non-zero size
+grep MLDSA build/zephyr/.config                    # options took effect
+find build -name "image_mldsa.c.obj" -o -name "mldsa_native.c.obj"
+$ZEPHYR_SDK_INSTALL_DIR/arm-zephyr-eabi/bin/arm-zephyr-eabi-nm build/zephyr/zephyr.elf | grep -i mldsa
+```
+
+Flash it (board connected over USB, `adb` reachable):
+
+```bash
+west flash
+```
+
+### Build, sign, and boot a test application
+
+MCUboot's own `samples/zephyr/hello-world` was removed upstream some time
+ago; use Zephyr's own `samples/hello_world` instead, with the
+`hello-mcuboot.conf` overlay in this repo (just sets
+`CONFIG_BOOTLOADER_MCUBOOT=y`):
+
+```bash
+cd ~/zephyr-pqc
+west build -b arduino_uno_q -d build-hello zephyr/samples/hello_world -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/hello-mcuboot.conf
+
+cd bootloader/mcuboot
+python3 scripts/imgtool.py sign \
+  --header-size 0x200 --pad-header --align 4 \
+  --slot-size <slot0_partition_size_from_board_dts> \
+  --version 1.0.0 \
+  -k root-mldsa44.pem \
+  ../../build-hello/zephyr/zephyr.bin ../../build-hello/zephyr/signed-hello.bin
+```
+
+(Find `<slot0_partition_size_from_board_dts>` from the `arduino_uno_q` board's
+devicetree partition layout in the Zephyr checkout, or read it back out of
+`build-hello/zephyr/zephyr.dts` after building — look for the `slot0_partition`
+node's `reg` size.)
+
+Flash `signed-hello.bin` to the primary slot address (not `west flash`,
+which targets the *bootloader* build directory — use your flash tool's
+address-specific write, e.g. `west flash --skip-rebuild` from a build
+configured against `build-hello`, or `STM32_Programmer_CLI`/`openocd`
+directly at the slot0 address). Then open the board's serial console and
+confirm you see Zephyr's normal `hello_world` output. **This is the
+sign of a successful boot.**
+
+### Tamper test (proves verification is actually enforced)
+
+Flip one byte inside the `MLDSA44` signature TLV of `signed-hello.bin` (the
+last ~2420 bytes of the TLV area, found after the `KEYHASH` TLV that
+precedes it — or just corrupt the very last byte of the file, which falls
+inside the signature for a minimal image) and reflash. Confirm the board no
+longer boots the app (bootloader should log a validation failure to the
+serial console and refuse to jump to it).
+
+### Hybrid mode
+
+Rebuild the bootloader with `overlay-mldsa44-hybrid-ecdsa.conf` instead
+(requires both `root-ec-p256.pem` and `root-mldsa44.pem`):
+
+```bash
+cd ~/zephyr-pqc/bootloader/mcuboot/boot/zephyr
+west build -p always -b arduino_uno_q -- \
+  -DEXTRA_CONF_FILE=$PWD/../../samples/zephyr/overlay-mldsa44-hybrid-ecdsa.conf
+west flash
+```
+
+Sign the test app with both keys and repeat the tamper test against each
+signature independently (this is the proof that both must pass -- not
+either/or):
+
+```bash
+python3 scripts/imgtool.py sign --header-size 0x200 --pad-header --align 4 \
+  --slot-size <slot0_partition_size> --version 1.0.0 \
+  -k root-ec-p256.pem --pqc-key root-mldsa44.pem \
+  ../../build-hello/zephyr/zephyr.bin ../../build-hello/zephyr/signed-hello-hybrid.bin
+```
+
+Run the 4-way matrix: (valid classical, valid ML-DSA) boots; corrupting
+*either one alone* must reject the image; corrupting both must also reject.
+
+### Recovery
+
+The Arduino UNO Q ships with a recovery path if the STM32 image gets
+overwritten by something broken:
+
+```bash
+adb shell arduino-cli burn-bootloader -b arduino:zephyr:unoq -P jlink
+```
+
+This restores the factory sketch-loader, so experimenting here carries no
+real risk of bricking the board.
+
 ## Using swap-using-scratch flash algorithm
 
 To use the swap-using-scratch flash algorithm, a scratch partition needs to be
