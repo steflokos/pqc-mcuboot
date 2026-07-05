@@ -299,11 +299,13 @@ find build -name "image_mldsa.c.obj" -o -name "mldsa_native.c.obj"
 $ZEPHYR_SDK_INSTALL_DIR/arm-zephyr-eabi/bin/arm-zephyr-eabi-nm build/zephyr/zephyr.elf | grep -i mldsa
 ```
 
-Flash it (board connected over USB, `adb` reachable):
-
-```bash
-west flash
-```
+**`west flash` does not work on this board** — it has no externally-reachable
+SWD debug probe. See
+[arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md#1-west-flash-does-not-work-on-this-board)
+for the actual flashing procedure (installing `arduino-cli` and calling its
+bundled `remoteocd` tool directly), and for known issues (console wiring,
+Zephyr version compatibility fixes, and an unresolved ML-DSA image-size bug)
+found while getting this running on real hardware.
 
 ### Build, sign, and boot a test application
 
@@ -319,7 +321,7 @@ west build -b arduino_uno_q -d build-hello zephyr/samples/hello_world -- \
 
 cd bootloader/mcuboot
 python3 scripts/imgtool.py sign \
-  --header-size 0x200 --pad-header --align 4 \
+  --header-size 0x400 --pad-header --align 4 \
   --slot-size <slot0_partition_size_from_board_dts> \
   --version 1.0.0 \
   -k root-mldsa44.pem \
@@ -329,15 +331,25 @@ python3 scripts/imgtool.py sign \
 (Find `<slot0_partition_size_from_board_dts>` from the `arduino_uno_q` board's
 devicetree partition layout in the Zephyr checkout, or read it back out of
 `build-hello/zephyr/zephyr.dts` after building — look for the `slot0_partition`
-node's `reg` size.)
+node's `reg` size. `--header-size` must match the app build's own
+`CONFIG_ROM_START_OFFSET` (`grep CONFIG_ROM_START_OFFSET build-hello/zephyr/.config`
+-- currently `0x400` for this board/config; a mismatch here makes MCUboot
+jump to the wrong offset and hard-fault immediately.)
 
-Flash `signed-hello.bin` to the primary slot address (not `west flash`,
-which targets the *bootloader* build directory — use your flash tool's
-address-specific write, e.g. `west flash --skip-rebuild` from a build
-configured against `build-hello`, or `STM32_Programmer_CLI`/`openocd`
-directly at the slot0 address). Then open the board's serial console and
-confirm you see Zephyr's normal `hello_world` output. **This is the
-sign of a successful boot.**
+Flash `signed-hello.bin` to the primary slot address — see
+[arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md#1-west-flash-does-not-work-on-this-board)
+for the actual procedure on this board (`west flash` does not work here at
+all, for either the bootloader or the app). Then open the board's serial
+console (see
+[arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md#2-seeing-console-output-requires-external-wiring--and-a-specific-tool)
+for wiring) and confirm you see Zephyr's normal `hello_world` output. **This
+is the sign of a successful boot.**
+
+**Known issue:** ML-DSA-signed images above roughly 40KB currently crash the
+bootloader on this board (a real, unresolved bug — see
+[arduino-uno-q-hardware-notes.md §4](arduino-uno-q-hardware-notes.md#4-known-bug-ml-dsa-bootloader-verification-crashes-above-a-size-threshold)).
+`hello_world` alone is well under this, so the walkthrough below works, but
+larger applications may hit it.
 
 ### Tamper test (proves verification is actually enforced)
 
@@ -357,8 +369,9 @@ Rebuild the bootloader with `overlay-mldsa44-hybrid-ecdsa.conf` instead
 cd ~/zephyr-pqc/bootloader/mcuboot/boot/zephyr
 west build -p always -b arduino_uno_q -- \
   -DEXTRA_CONF_FILE=$PWD/../../samples/zephyr/overlay-mldsa44-hybrid-ecdsa.conf
-west flash
 ```
+Flash per [arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md#1-west-flash-does-not-work-on-this-board)
+(`west flash` does not work on this board).
 
 Sign the test app with both keys and repeat the tamper test against each
 signature independently (this is the proof that both must pass -- not
