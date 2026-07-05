@@ -239,8 +239,9 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install west
 
-# West workspace from upstream Zephyr (>= v4.3.0 for arduino_uno_q board support)
-west init -m https://github.com/zephyrproject-rtos/zephyr --mr v4.3.0 .
+# West workspace from upstream Zephyr (>= v4.3.0 for arduino_uno_q board support;
+# v4.4.1 is the latest stable release at the time of writing)
+west init -m https://github.com/zephyrproject-rtos/zephyr --mr v4.4.1 .
 west update
 
 # Use requirements-base.txt, NOT the umbrella requirements.txt: the full
