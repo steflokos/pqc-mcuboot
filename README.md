@@ -48,12 +48,15 @@ Zephyr port, alongside the classical signature types. Two modes:
   an ML-DSA signature must independently verify for boot to succeed.
 - **PQC-only**: ML-DSA alone, no classical signature required.
 
-All three ML-DSA parameter sets (44/65/87) are selectable via Kconfig. See
+All three ML-DSA parameter sets (44/65/87) are selectable via Kconfig.
+
+**New here? Start with [docs/QUICKSTART.md](docs/QUICKSTART.md)** for a
+fresh-checkout-to-booting-hardware walkthrough (Arduino UNO Q / STM32U585).
+For the exhaustive reference (every Kconfig option, every ML-DSA level,
+tamper-test recipes, and the hardware debugging methodology) see
 [docs/readme-zephyr.md](docs/readme-zephyr.md#ml-dsa-post-quantum-and-hybrid-signing)
-for the Kconfig options and imgtool usage, and
-[docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q](docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q)
-for a fully reproducible build/sign/flash/tamper-test walkthrough targeting
-the Arduino UNO Q (STM32U585).
+and
+[docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q](docs/readme-zephyr.md#testing-on-real-hardware-arduino-uno-q).
 
 ## MCUboot How-tos
 

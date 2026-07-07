@@ -34,3 +34,6 @@ compile_commands.json
 
 # The target directory from Rust development
 /target/
+
+# macOS Finder metadata
+.DS_Store

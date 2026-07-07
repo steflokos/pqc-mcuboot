@@ -412,6 +412,10 @@ config BOOT_ED25519_PSA
 	select BOOT_ED25519_PSA_DEPENDENCIES
 	select BOOT_X25519_PSA_DEPENDENCIES if BOOT_ENCRYPT_IMAGE
 
+endchoice # BOOT_ED25519_IMPLEMENTATION
+
+endif # BOOT_SIGNATURE_TYPE_ED25519
+
 endchoice
 
 config BOOT_KEY_IMPORT_BYPASS_ASN
@@ -422,9 +426,11 @@ config BOOT_KEY_IMPORT_BYPASS_ASN
 	  bypasses the ASN.1 decoding and directly accesses the key
 	  in ASN.1 bitstream; this reduces MCUboot code by removing
 	  the ASN.1 processing.
-endif
 
-endchoice
+	  Applies independently to whichever of ED25519 and ML-DSA are
+	  enabled (see image_ed25519.c / image_mldsa.c); RSA and ECDSA
+	  verification always require ASN.1 parsing regardless of this
+	  option.
 
 config BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
 	bool "Enable ML-DSA (post-quantum, FIPS 204) signature verification"
@@ -481,13 +487,21 @@ config BOOT_SIGNATURE_MLDSA_KEY_FILE
 	  imgtool getpub, generate the embedded public key for) the ML-DSA
 	  signature. Same path-resolution rules as BOOT_SIGNATURE_KEY_FILE.
 
-	  Note: ML-DSA verification uses a large amount of stack (roughly
-	  9-13KB for ML-DSA-44 up to ML-DSA-87 with reduced-RAM mode, more
-	  without). Ensure CONFIG_MAIN_STACK_SIZE (or the equivalent thread
-	  stack for whichever thread performs image validation) is sized
-	  accordingly for your board -- this is not defaulted automatically
-	  here since it depends on the toolchain, optimization level, and
-	  what else already runs on that stack.
+	  Note: ML-DSA verification uses a large amount of stack -- much more
+	  than the roughly 9-13KB once assumed here. Measured directly on
+	  real hardware (arduino_uno_q/stm32u585xx, GNU Arm toolchain,
+	  reduced-RAM mode): CONFIG_MAIN_STACK_SIZE=32768 reliably crashes
+	  mid-verify (stack overflow) for all three levels (44/65/87), while
+	  65536 works for all three. This was not a per-level tuned minimum
+	  search -- treat 65536 as a known-good starting point for this
+	  toolchain/board, not a hard requirement or a ceiling; verify
+	  empirically for other toolchains, optimization levels, or boards.
+	  Ensure CONFIG_MAIN_STACK_SIZE (or the equivalent thread stack for
+	  whichever thread performs image validation) is sized accordingly --
+	  this is not defaulted automatically here since it depends on the
+	  toolchain, optimization level, and what else already runs on that
+	  stack. See samples/zephyr/overlay-mldsa{44,65,87}-*.conf and
+	  docs/arduino-uno-q-hardware-notes.md for the methodology.
 
 endif # BOOT_SIGNATURE_TYPE_MLDSA_ENABLE
 
@@ -1302,7 +1316,7 @@ config FIND_NEXT_SLOT_HOOKS
 
 config BOOT_DISABLE_CACHES
 	bool "Disable I/D caches before chain-loading application"
-	depends on CPU_HAS_ICACHE || CPU_HAS_DCACHE
+	depends on CPU_HAS_ICACHE || CPU_HAS_DCACHE || ICACHE || DCACHE
 	default y
 	help
 	  Will flush and disable the instruction and data caches on the CPU prior to

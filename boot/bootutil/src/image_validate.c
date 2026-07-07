@@ -107,6 +107,15 @@ BOOT_LOG_MODULE_DECLARE(mcuboot);
 #    endif
 #    define EXPECTED_MLDSA_SIG_LEN(x) ((x) == MLDSA_SIG_BUF_SIZE)
 #    if !defined(EXPECTED_SIG_TLV)
+#        if !defined(MCUBOOT_SIGN_MLDSA_PQC_ONLY)
+/*
+ * No classical algorithm is selected, so this build will behave as
+ * PQC-only below regardless -- but that intent must be confirmed via
+ * BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY so the Kconfig option and the actual
+ * compiled mode can never silently diverge.
+ */
+#            error "No classical signature type is selected and ML-DSA is enabled: set BOOT_SIGNATURE_TYPE_MLDSA_PQC_ONLY to confirm PQC-only mode is intended"
+#        endif
 /*
  * PQC-only mode: no classical algorithm is compiled in. Reuse the
  * single-signature code path below unchanged by aliasing the "classical"

@@ -79,6 +79,20 @@ Running the exact same command a second time and confirming no
 `Error: verify failed` line appears is a reliable way to check a flash
 actually persisted.
 
+**Caveat for tamper testing specifically:** when reflashing a file that
+differs from what's already in flash by only a handful of bytes (e.g. one
+flipped byte inside a signature, for a tamper test), the write can silently
+leave the *old* content in place — no `Error: verify failed` is printed, but
+the board still boots the previous (valid) image, giving a false "tamper
+test failed to catch corruption" result. Confirmed directly: a single-byte
+flip inside an ML-DSA signature appeared to boot successfully once, but
+reflashing the exact same tampered file right after a genuinely different
+valid image (forcing a full rewrite) then correctly rejected it every time,
+across nine different byte offsets tested. Always flash a substantially
+different image (or re-flash the *valid* image first) immediately before
+flashing a tampered variant, rather than reflashing a near-identical file
+over itself.
+
 ## 2. Seeing console output requires external wiring — and a specific tool
 
 The board's `zephyr,console` is `usart1` (see
@@ -126,15 +140,62 @@ breaks, unrelated to the PQC work:
    `string` type declaration — newer Kconfig tooling treats this as a fatal
    error rather than a warning.
 
-## 4. Known bug: ML-DSA bootloader verification crashes above a size threshold
+## 4. Root-caused: `--pad-header` corrupts the vector table offset, not a size or PQC bug
 
-**Status: unresolved, real, reproducible. Not caused by application code.**
+**Status: resolved.** What was originally reported here as an ML-DSA-specific
+"crashes above a ~40KB size threshold" bug was actually a signing-command bug
+that reproduces on **any** signed image — any size, any signature type,
+including plain ECDSA. It was only ever *observed* on larger ML-DSA/hybrid
+images because those happened to be what got tested most; a plain, tiny
+(20KB) ECDSA-signed `hello_world`, signed with the exact command this doc
+used to recommend, reproduces the identical crash.
 
-Signing and booting an application image with ML-DSA (either PQC-only or
-hybrid mode) works up to a point, then causes a hardware lockup
-(`clearing lockup after double fault` in OpenOCD, CPU parked in Zephyr's
-`arch_system_halt`) immediately after MCUboot hands off to the app — before
-the app's own first line of code runs.
+### The actual bug
+
+`imgtool sign --pad-header` tells imgtool "this input has no reserved header
+space, please prepend one." But with `CONFIG_ROM_START_OFFSET` set (as it is
+for this board), Zephyr's linker already reserves `--header-size` bytes of
+zero padding at the start of `zephyr.bin` itself, for imgtool's header to
+overwrite in place. Passing `--pad-header` on top of that inserts a
+*second*, redundant header-sized gap. The resulting file still has a
+syntactically valid MCUboot header (correct magic, correct `hdr_size`,
+correct `img_size`) at the start of the partition, so MCUboot happily parses
+it, verifies the signature, and decides to boot — but the real vector table
+now sits `--header-size` bytes further into the file than MCUboot's jump
+target (`partition_base + header_size`) expects. MCUboot jumps straight into
+what is still zero padding, and the CPU faults trying to execute/fetch
+through a null vector table — the exact `clearing lockup after double fault`
+symptom below.
+
+Confirmed directly: dumping the signed `.bin` showed the real vector table
+(`90 10 00 20 c1 0f 01 08 ...`, matching the ELF's actual reset vector) at
+file offset `0x800`, not `0x400`, when signed with `--header-size 0x400
+--pad-header`. Removing `--pad-header` moved it to exactly `0x400`, and the
+board booted cleanly (`Hello World! arduino_uno_q/stm32u585xx` printed over
+the console) with no other changes.
+
+**Fix: never pass `--pad-header` when `CONFIG_ROM_START_OFFSET` is set for
+the app build** (true for every config in this repo's `samples/zephyr/`).
+`--header-size` must still match `CONFIG_ROM_START_OFFSET` exactly, as
+already noted below, but that check alone doesn't catch this — a
+size-matched `--header-size` with `--pad-header` still corrupts the offset.
+
+Two other things were tried and ruled out while chasing this (kept here since
+they're real, worthwhile fixes even though they weren't the cause):
+`CONFIG_BOOT_INTR_VEC_RELOC` was off for this board (its default depends on
+`CPU_HAS_ICACHE`/`CPU_HAS_DCACHE`, which STM32U5 doesn't select even though
+it has a real I-cache under `CONFIG_ICACHE`/`CONFIG_DCACHE` — same gap
+affected `BOOT_DISABLE_CACHES`'s default). Both are now fixed in
+`boot/zephyr/Kconfig` and worth keeping enabled, but neither one, alone or
+together, fixed this crash — only removing `--pad-header` did.
+
+### Symptom (kept for reference)
+
+Signing and booting an application image with `--pad-header` set (ML-DSA,
+hybrid, or plain ECDSA) causes a hardware lockup (`clearing lockup after
+double fault` in OpenOCD, CPU parked in Zephyr's `arch_system_halt`)
+immediately after MCUboot hands off to the app — before the app's own first
+line of code runs.
 
 ### What's confirmed
 
@@ -182,9 +243,8 @@ DAP register access via this bridge.
 ### Reproduction
 
 ```bash
-# Known-good baseline (works): plain hello_world, ECDSA-signed, any size tested.
-# Known-bad: same image content, PQC-only or hybrid ML-DSA signed, above ~40KB.
-
+# Reproduces the crash, on ANY image, size, or signature type -- the bug is
+# --pad-header, not ML-DSA or size:
 west build -b arduino_uno_q -d build-x zephyr/samples/hello_world -- \
   -DEXTRA_CONF_FILE=path/to/hello-mcuboot.conf
 python3 scripts/imgtool.py sign --header-size 0x400 --pad-header --align 4 \
@@ -195,15 +255,30 @@ python3 scripts/imgtool.py sign --header-size 0x400 --pad-header --align 4 \
 # MCUboot logs "Jumping to the first image slot", then nothing further --
 # the app never prints anything, and a debug connect shows the CPU parked
 # in a lockup.
+
+# Fix: drop --pad-header. Boots cleanly, any size/signature type tested so far.
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
+  --slot-size 0x68000 --version 1.0.0 \
+  -k root-ec-p256.pem --pqc-key root-mldsa44.pem \
+  build-x/zephyr/zephyr.bin build-x/zephyr/signed.bin
 ```
 
 ### Practical workaround
 
-Keep signed application images under the working threshold (empirically
-~39.7KB in hybrid mode with the current bootloader build) until this is
-root-caused. For `pqc_selftest`, this means testing ML-DSA and ML-KEM
-self-tests separately (smaller binaries) rather than together, or trimming
-logging/test vectors to reduce image size.
+None needed — see above. Drop `--pad-header` from every `imgtool sign`
+invocation in this repo's docs/scripts when `CONFIG_ROM_START_OFFSET` is set
+for the app build (true everywhere in `samples/zephyr/`). The `>40KB`
+threshold this section used to describe was never actually about size —
+re-verify any previously-"too big" image with `--pad-header` removed before
+assuming it still fails.
+
+**Re-verified directly:** a `hello_world` padded with a 25KB `volatile
+const` array (46868 bytes signed, hybrid ECDSA+ML-DSA-44, well past the old
+~40KB threshold) boots and verifies correctly with the fixes in this
+document applied (no `--pad-header`, `CONFIG_MAIN_STACK_SIZE=65536`), and a
+tamper test against it is correctly rejected. Image size is not an
+independent factor once `--pad-header` is removed and the stack is sized
+per §5 below.
 
 ### Fixed along the way (real bugs, not related to the above)
 
@@ -229,3 +304,50 @@ fixed:
   immediately — a different, well-understood failure mode from the size bug
   above (confirmed via `grep CONFIG_ROM_START_OFFSET build/zephyr/.config`
   matching the `--header-size` argument, in every build since).
+
+## 5. ML-DSA stack size: measured across all three parameter sets (44/65/87)
+
+Once the `--pad-header` bug above was fixed, the ML-DSA-44 hybrid build
+still crashed — this time genuinely mid-verify, not at handoff. Debug
+logging (`CONFIG_MCUBOOT_LOG_LEVEL_DBG=y`) pinpointed it: the log cut off
+mid-line right after `bootutil_verify_sig_mldsa: ML-DSA-44 key_id 1`, then
+the board rebooted into MCUboot's banner again — a stack overflow during
+the actual ML-DSA verify call, not a signature mismatch (which would have
+printed a clean rejection message and kept running).
+
+The Kconfig help text for `BOOT_SIGNATURE_MLDSA_KEY_FILE` estimated
+"roughly 9-13KB" of extra stack for this. That estimate was wrong by a
+large margin in practice:
+
+| `CONFIG_MAIN_STACK_SIZE` | ML-DSA-44 | ML-DSA-65 | ML-DSA-87 |
+|---|---|---|---|
+| 10240 (Zephyr default) | crashes | not tested (already known bad) | not tested |
+| 32768 | crashes mid-verify | crashes mid-verify | not tested (already known bad) |
+| 65536 | **works** | **works** | **works** |
+
+All three parameter sets were tested the same way: build the hybrid
+bootloader (`overlay-mldsa44-hybrid-ecdsa.conf` as a base, with
+`CONFIG_BOOT_SIGNATURE_TYPE_MLDSA_{44,65,87}` and
+`CONFIG_BOOT_SIGNATURE_MLDSA_KEY_FILE` overridden per level), sign
+`hello_world` with the matching `root-mldsa{44,65,87}.pem` key plus
+`root-ec-p256.pem`, flash, and watch the debug log either cut off
+mid-verify (crash) or reach `Left boot_go with success == 1` followed by
+`Hello World!` on the console (success). A tamper test (flip one byte in
+the ML-DSA signature TLV) was also re-run at each level that succeeded, to
+confirm rejection still works.
+
+This was **not** a search for each level's exact minimum stack — just two
+sample sizes (32768, 65536) to see whether the requirement scales enough
+with parameter set to need a different overlay per level. It doesn't, at
+least not within this range: 65536 covers all three on this exact
+toolchain/board/application. Ready-made overlays exist for all three at
+this stack size:
+`samples/zephyr/overlay-mldsa{44,65,87}-{hybrid-ecdsa,pqconly}.conf`.
+
+**This number is specific to this toolchain, optimization level, board,
+and application** (a single `printf` in `hello_world`) — it is not a
+portable constant. A different compiler, a `-O0` build, or a call chain
+that itself uses more stack before reaching the verify call could all
+require more. Re-verify empirically (the debug-log-cutoff method above,
+or the GDB `bootutil_verify_sig_mldsa` breakpoint from the commands
+reference in `readme-zephyr.md`) rather than assuming 65536 is universal.

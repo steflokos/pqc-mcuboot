@@ -197,13 +197,22 @@ image for hybrid mode, pass both keys:
 For PQC-only mode, pass only the ML-DSA key with `-k`.
 
 ML-DSA signature verification uses considerably more stack than the
-classical algorithms (roughly 9-13KB for the reduced-RAM configuration
-MCUboot defaults to, more without it), and the embedded keys/signatures
-are much larger (1312-2592 byte public keys, 2420-4627 byte signatures,
-depending on parameter set). Ensure the bootloader's stack size
-(`CONFIG_MAIN_STACK_SIZE` or equivalent) and the target's flash budget are
-sized accordingly, and validate empirically on real hardware -- do not
-assume the defaults are sufficient for every board/toolchain combination.
+classical algorithms and much more than the roughly 9-13KB once assumed
+here. Measured directly on real hardware
+(`arduino_uno_q/stm32u585xx`, GNU Arm toolchain, reduced-RAM mode):
+`CONFIG_MAIN_STACK_SIZE=32768` reliably crashes mid-verify (stack overflow)
+for **all three** parameter sets (44/65/87); `65536` works for all three.
+This was a "does it work" check at two sizes, not a per-level minimum
+search -- treat 65536 as a known-good starting point for this
+toolchain/board, not a hard requirement, and re-verify empirically for any
+other toolchain, optimization level, or board (see
+`samples/zephyr/overlay-mldsa{44,65,87}-{hybrid-ecdsa,pqconly}.conf` for
+ready-made overlays, and
+[arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md) for the
+debug-log-based methodology used to find this). The embedded keys/signatures
+are also much larger than classical ones (1312-2592 byte public keys,
+2420-4627 byte signatures, depending on parameter set) -- ensure the
+target's flash budget is sized accordingly too.
 
 ## Testing on real hardware (Arduino UNO Q)
 
@@ -321,7 +330,7 @@ west build -b arduino_uno_q -d build-hello zephyr/samples/hello_world -- \
 
 cd bootloader/mcuboot
 python3 scripts/imgtool.py sign \
-  --header-size 0x400 --pad-header --align 4 \
+  --header-size 0x400 --align 4 \
   --slot-size <slot0_partition_size_from_board_dts> \
   --version 1.0.0 \
   -k root-mldsa44.pem \
@@ -336,6 +345,23 @@ node's `reg` size. `--header-size` must match the app build's own
 -- currently `0x400` for this board/config; a mismatch here makes MCUboot
 jump to the wrong offset and hard-fault immediately.)
 
+**Do not add `--pad-header` here.** With `CONFIG_ROM_START_OFFSET` set (as it
+is for this board), Zephyr's own linker script already reserves
+`--header-size` bytes of leading zero padding inside `zephyr.bin` itself for
+the header to overwrite. `--pad-header` tells imgtool the *opposite* — that
+the input has *no* reserved header space and one must be prepended — which
+inserts a second, redundant header-sized gap in front of the real one. The
+resulting file still has a syntactically valid header (so MCUboot happily
+parses it and decides to boot), but the vector table ends up
+`--header-size` bytes further into the file than MCUboot's jump target
+`partition_base + header_size` expects. MCUboot jumps into what is actually
+still-reserved zero padding and hard-faults immediately — this reproduces
+identically on real hardware regardless of image size or signature type,
+and was the actual cause of every "MCUboot jumps then nothing happens" crash
+we hit while bringing this board up, not a size- or PQC-specific bug (see
+[arduino-uno-q-hardware-notes.md §4](arduino-uno-q-hardware-notes.md#4-known-bug-ml-dsa-bootloader-verification-crashes-above-a-size-threshold)
+for how this was finally root-caused).
+
 Flash `signed-hello.bin` to the primary slot address — see
 [arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md#1-west-flash-does-not-work-on-this-board)
 for the actual procedure on this board (`west flash` does not work here at
@@ -345,11 +371,13 @@ console (see
 for wiring) and confirm you see Zephyr's normal `hello_world` output. **This
 is the sign of a successful boot.**
 
-**Known issue:** ML-DSA-signed images above roughly 40KB currently crash the
-bootloader on this board (a real, unresolved bug — see
-[arduino-uno-q-hardware-notes.md §4](arduino-uno-q-hardware-notes.md#4-known-bug-ml-dsa-bootloader-verification-crashes-above-a-size-threshold)).
-`hello_world` alone is well under this, so the walkthrough below works, but
-larger applications may hit it.
+**Previously-reported issue, now root-caused:** what looked like an ML-DSA-
+specific "images above roughly 40KB crash the bootloader" bug was actually
+the `--pad-header` bug described above — see
+[arduino-uno-q-hardware-notes.md §4](arduino-uno-q-hardware-notes.md#4-known-bug-ml-dsa-bootloader-verification-crashes-above-a-size-threshold)
+for the full account, including why it only *appeared* size-correlated.
+Re-verify with `--pad-header` removed before assuming any remaining crash is
+new.
 
 ### Tamper test (proves verification is actually enforced)
 
@@ -378,11 +406,14 @@ signature independently (this is the proof that both must pass -- not
 either/or):
 
 ```bash
-python3 scripts/imgtool.py sign --header-size 0x200 --pad-header --align 4 \
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
   --slot-size <slot0_partition_size> --version 1.0.0 \
   -k root-ec-p256.pem --pqc-key root-mldsa44.pem \
   ../../build-hello/zephyr/zephyr.bin ../../build-hello/zephyr/signed-hello-hybrid.bin
 ```
+(`--header-size` must still match this build's own `CONFIG_ROM_START_OFFSET`
+-- do not assume `0x200` without checking; see the note above about why
+`--pad-header` must not be used here either.)
 
 Run the 4-way matrix: (valid classical, valid ML-DSA) boots; corrupting
 *either one alone* must reject the image; corrupting both must also reject.
@@ -398,6 +429,213 @@ adb shell arduino-cli burn-bootloader -b arduino:zephyr:unoq -P jlink
 
 This restores the factory sketch-loader, so experimenting here carries no
 real risk of bricking the board.
+
+## Reproducible commands: build, sign, flash, and debug all three modes
+
+This section is a copy-pasteable command reference for the three secure-boot
+configurations exercised on the Arduino UNO Q (`arduino_uno_q/stm32u585xx`):
+**plain ECDSA-P256**, **hybrid ECDSA-P256 + ML-DSA-44**, and **PQC-only
+ML-DSA-44**. All three were rebuilt from scratch and independently verified
+(boot + tamper test) on real hardware; see
+[arduino-uno-q-hardware-notes.md](arduino-uno-q-hardware-notes.md) for the
+root-caused bugs found along the way (`--pad-header`, insufficient
+`CONFIG_MAIN_STACK_SIZE`, the `BOOT_INTR_VEC_RELOC`/`BOOT_DISABLE_CACHES`
+Kconfig gaps) — all fixes are already reflected in the commands below.
+
+Run everything from the west workspace root (`~/zephyr-pqc` per the setup
+section above), with the venv activated and `ZEPHYR_SDK_INSTALL_DIR` set.
+
+### Shared setup (once per session)
+
+```bash
+source .venv/bin/activate
+export ZEPHYR_SDK_INSTALL_DIR=$PWD/zephyr-sdk
+
+# Flashing bridge (this board has no external SWD probe; see
+# arduino-uno-q-hardware-notes.md #1 for why this is necessary)
+REMOTEOCD=$(ls ~/Library/Arduino15/packages/arduino/tools/remoteocd/*/remoteocd | head -1)
+ADB=$(ls ~/Library/Arduino15/packages/arduino/tools/adb/*/adb | head -1)
+BOOTCFG=$(ls -d ~/Library/Arduino15/packages/arduino/hardware/zephyr/*/variants/arduino_uno_q_stm32u585xx | head -1)/flash_bootloader.cfg
+SERIAL=$($ADB devices | awk 'NR==2{print $1}')
+
+# Custom OpenOCD recipe for flashing a raw signed app binary to slot0
+# (0x08010000, size 0x68000 -- read back from <build>/zephyr/zephyr.dts if
+# your partition layout differs)
+cat > /tmp/flash_app.cfg << 'EOF'
+reset_config srst_only srst_nogate srst_push_pull connect_assert_srst
+init
+reset
+halt
+flash erase_address 0x08010000 0x68000
+flash write_image ${filename0} 0x08010000 bin
+flash verify_image ${filename0} 0x08010000 bin
+reset
+shutdown
+EOF
+
+# Serial console (see arduino-uno-q-hardware-notes.md #2 for wiring --
+# an external USB-TTL adapter on D0/D1, separate from the adb/USB link)
+screen -L -dmS pqcconsole /dev/cu.usbmodemXXXX 115200   # find the right /dev/cu.usbmodem* first
+```
+
+**Tamper-test caveat:** reflashing a file that differs from what's already in
+flash by only a few bytes can silently leave the old content in place (no
+error printed) -- always flash a genuinely different image (or the valid
+image) immediately before flashing a tampered variant. See
+[arduino-uno-q-hardware-notes.md §4](arduino-uno-q-hardware-notes.md#4-root-caused---pad-header-corrupts-the-vector-table-offset-not-a-size-or-pqc-bug).
+
+### Stage 0: plain ECDSA-P256 (baseline)
+
+```bash
+# Build the bootloader
+west build -b arduino_uno_q -d build-boot-ecdsa bootloader/mcuboot/boot/zephyr -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/overlay-ecdsa-p256.conf \
+  -DCONFIG_BOOT_INTR_VEC_RELOC=y
+
+# Build the test app
+west build -b arduino_uno_q -d build-hello-ecdsa zephyr/samples/hello_world -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/hello-mcuboot.conf
+
+# Sign (no --pad-header -- see the caveat earlier in this doc)
+cd bootloader/mcuboot
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
+  --slot-size 0x68000 --version 1.0.0 \
+  -k root-ec-p256.pem \
+  ../../build-hello-ecdsa/zephyr/zephyr.bin ../../build-hello-ecdsa/zephyr/signed-hello-ecdsa.bin
+cd ../..
+
+# Flash bootloader, then app
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f "$BOOTCFG" build-boot-ecdsa/zephyr/zephyr.elf
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f /tmp/flash_app.cfg build-hello-ecdsa/zephyr/signed-hello-ecdsa.bin
+
+# Confirm: console should show MCUboot's banner, "Jumping to the first image
+# slot", then "Hello World! arduino_uno_q/stm32u585xx"
+cat screenlog.0
+```
+
+### Stage 1: hybrid ECDSA-P256 + ML-DSA-44
+
+```bash
+# Build the bootloader (CONFIG_MAIN_STACK_SIZE=65536 comes from the overlay)
+west build -b arduino_uno_q -d build-boot-hybrid bootloader/mcuboot/boot/zephyr -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/overlay-mldsa44-hybrid-ecdsa.conf \
+  -DCONFIG_BOOT_INTR_VEC_RELOC=y
+
+# Build the test app (same app works for every mode)
+west build -b arduino_uno_q -d build-hello-hybrid zephyr/samples/hello_world -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/hello-mcuboot.conf
+
+# Sign with both keys
+cd bootloader/mcuboot
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
+  --slot-size 0x68000 --version 1.0.0 \
+  -k root-ec-p256.pem --pqc-key root-mldsa44.pem \
+  ../../build-hello-hybrid/zephyr/zephyr.bin ../../build-hello-hybrid/zephyr/signed-hello-hybrid.bin
+cd ../..
+
+# Flash bootloader, then app
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f "$BOOTCFG" build-boot-hybrid/zephyr/zephyr.elf
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f /tmp/flash_app.cfg build-hello-hybrid/zephyr/signed-hello-hybrid.bin
+cat screenlog.0   # expect "Hello World! ..." after MCUboot's log
+
+# Tamper test: dump the TLV layout to find each signature's byte range,
+# flip one byte in it, reflash, and confirm rejection -- repeat once for
+# ECDSA (TLV type 0x22) and once for ML-DSA (TLV type 0x26)
+python3 bootloader/mcuboot/scripts/imgtool.py dumpinfo build-hello-hybrid/zephyr/signed-hello-hybrid.bin
+python3 - << 'EOF'
+with open('build-hello-hybrid/zephyr/signed-hello-hybrid.bin', 'rb') as f:
+    data = bytearray(f.read())
+data[<offset_inside_one_signature>] ^= 0xFF
+with open('/tmp/tampered.bin', 'wb') as f:
+    f.write(data)
+EOF
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f /tmp/flash_app.cfg /tmp/tampered.bin
+cat screenlog.0   # expect "E: Image in the primary slot is not valid!"
+```
+
+### Stage 2: PQC-only ML-DSA-44
+
+```bash
+# Build the bootloader
+west build -b arduino_uno_q -d build-boot-pqconly bootloader/mcuboot/boot/zephyr -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/overlay-mldsa44-pqconly.conf \
+  -DCONFIG_BOOT_INTR_VEC_RELOC=y
+
+# Build the test app
+west build -b arduino_uno_q -d build-hello-pqconly zephyr/samples/hello_world -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/hello-mcuboot.conf
+
+# Sign with only the ML-DSA key (no classical key, no --pqc-key flag)
+cd bootloader/mcuboot
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
+  --slot-size 0x68000 --version 1.0.0 \
+  -k root-mldsa44.pem \
+  ../../build-hello-pqconly/zephyr/zephyr.bin ../../build-hello-pqconly/zephyr/signed-hello-pqconly.bin
+cd ../..
+
+# Flash bootloader, then app
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f "$BOOTCFG" build-boot-pqconly/zephyr/zephyr.elf
+"$REMOTEOCD" upload --adb-path "$ADB" -s "$SERIAL" -f /tmp/flash_app.cfg build-hello-pqconly/zephyr/signed-hello-pqconly.bin
+cat screenlog.0   # expect "Hello World! ..." after MCUboot's log
+
+# Tamper test (flip a byte inside the MLDSA44 TLV, reflash a genuinely
+# different image first per the caveat above, then reflash the tampered one)
+cat screenlog.0   # expect "E: Image in the primary slot is not valid!"
+```
+
+### ML-DSA-65 and ML-DSA-87 (same recipe, different level)
+
+Ready-made overlays exist for all three levels:
+`overlay-mldsa{44,65,87}-{hybrid-ecdsa,pqconly}.conf`. Swap the overlay file
+and the signing key (`root-mldsa65.pem` / `root-mldsa87.pem`) into any of the
+three stage recipes above -- everything else (flashing, console check,
+tamper test) is identical. Example for hybrid mode at ML-DSA-65:
+
+```bash
+west build -b arduino_uno_q -d build-boot-mldsa65 bootloader/mcuboot/boot/zephyr -- \
+  -DEXTRA_CONF_FILE=$PWD/bootloader/mcuboot/samples/zephyr/overlay-mldsa65-hybrid-ecdsa.conf \
+  -DCONFIG_BOOT_INTR_VEC_RELOC=y
+
+cd bootloader/mcuboot
+python3 scripts/imgtool.py sign --header-size 0x400 --align 4 \
+  --slot-size 0x68000 --version 1.0.0 \
+  -k root-ec-p256.pem --pqc-key root-mldsa65.pem \
+  ../../build-hello-hybrid/zephyr/zephyr.bin ../../build-hello-hybrid/zephyr/signed-hello-mldsa65.bin
+cd ../..
+```
+
+`CONFIG_MAIN_STACK_SIZE=65536` (already set in these overlays) was verified
+sufficient for all three parameter sets on this board/toolchain -- see
+[arduino-uno-q-hardware-notes.md §5](arduino-uno-q-hardware-notes.md#5-ml-dsa-stack-size-measured-across-all-three-parameter-sets-446587)
+for how that was determined and why it isn't a portable constant.
+
+### Debugging with GDB (no external probe needed)
+
+The Qualcomm side of the board (QRB2210) already exposes a CMSIS-DAP-style
+debug bridge over `adb` -- no SWD wiring required:
+
+```bash
+# One-time per session: start the on-board debug server and forward its port
+adb forward tcp:3333 tcp:3333
+adb shell arduino-debug &
+
+# Attach GDB (from the Zephyr SDK), using whichever bootloader ELF you're
+# currently debugging for symbols
+arm-zephyr-eabi-gdb -q build-boot-hybrid/zephyr/zephyr.elf
+(gdb) target extended-remote localhost:3333
+(gdb) monitor reset halt
+(gdb) break do_boot          # or bootutil_verify_sig_mldsa, image_validate.c lines, etc.
+(gdb) continue
+(gdb) print/x $pc
+(gdb) x/8xw 0x08010400        # inspect the app's vector table in flash directly
+```
+
+If a later `adb shell arduino-debug` fails with "Error requesting gpio line
+swdio", a previous OpenOCD instance is still holding the debug GPIO --
+`adb shell "pkill -9 openocd"` and restart it. Each new GDB connection also
+needs the previous one to have exited cleanly (add `quit` at the end of any
+scripted GDB session), or the board's OpenOCD rejects new connections with
+"no more connections allowed".
 
 ## Using swap-using-scratch flash algorithm
 
